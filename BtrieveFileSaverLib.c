@@ -100,9 +100,46 @@ unsigned short int freeClient (CLIENT_STRUCT *cl, unsigned short int ErrorCode)
 *	Just swap the bytes of a 32 bit int value
 *
 */
-static unsigned long int byte_swap(unsigned long int i )
+static uint32_t byte_swap(uint32_t i )
 {
 	return ((i>>16)&0xFFFF) | (i<<16);
+}
+
+static uint16_t read_le16(const void *data)
+{
+	const unsigned char *bytes = (const unsigned char*)data;
+	return (uint16_t)(bytes[0] | ((uint16_t)bytes[1] << 8));
+}
+
+static uint32_t read_le32(const void *data)
+{
+	const unsigned char *bytes = (const unsigned char*)data;
+	return (uint32_t)bytes[0] |
+		((uint32_t)bytes[1] << 8) |
+		((uint32_t)bytes[2] << 16) |
+		((uint32_t)bytes[3] << 24);
+}
+
+static uint32_t read_word_swapped_u32(const void *data)
+{
+	return (uint32_t)byte_swap(read_le32(data));
+}
+
+static void write_le32(void *data, uint32_t value)
+{
+	unsigned char *bytes = (unsigned char*)data;
+	bytes[0] = (unsigned char)(value & 0xff);
+	bytes[1] = (unsigned char)((value >> 8) & 0xff);
+	bytes[2] = (unsigned char)((value >> 16) & 0xff);
+	bytes[3] = (unsigned char)((value >> 24) & 0xff);
+}
+
+static uint32_t read_vrec_page_id_v5(const char *data)
+{
+	uint32_t value = (uint32_t)(unsigned char)data[0] |
+		((uint32_t)(unsigned char)data[1] << 16) |
+		((uint32_t)(unsigned char)data[2] << 24);
+	return value == PAGE_KICK_OFF ? value : byte_swap(value);
 }
 
 /*
@@ -123,7 +160,7 @@ char	getPageType (CLIENT_STRUCT *cl, char *tmpPage)
 		case BTRIEVE_FILE_V3:
 		case BTRIEVE_FILE_V4:
 		case BTRIEVE_FILE_V5:{
-			if (*(unsigned short int*)(tmpPage + 4) & 0x8000) return DAT_PAGE_ID;
+			if (read_le16(tmpPage + 4) & 0x8000) return DAT_PAGE_ID;
 		}break;
 		case BTRIEVE_FILE_V6:
 		case BTRIEVE_FILE_V61:
@@ -190,13 +227,13 @@ unsigned long int	addPage (CLIENT_STRUCT *cl, char *tmpPage, char pageType)
 	}else return NO_ERROR;
 
 	if (cl->fVersion >= BTRIEVE_FILE_V8){
-		pId =  *(short*) tmpPage;
-		pUsage = (short)*(tmpPage + 6);
+		pId = read_le16(tmpPage);
+		pUsage = read_le16(tmpPage + 6);
 	}else{
-		pId = *(unsigned long int*)tmpPage;
+		pId = read_le32(tmpPage);
 		pId &= PAGE_KICK_OFF;
 		pId = byte_swap(pId);
-		pUsage = *(signed short*)(tmpPage + 4);
+		pUsage = read_le16(tmpPage + 4);
 	}
 
 	/* check if you have allready a page using the same id but lower usage counter */
@@ -281,7 +318,7 @@ unsigned short int readAllPagesFromFile  (CLIENT_STRUCT *cl)
 	while ((pType = getNextPhysicalPage(cl, cl->CUR_DPAGE)) != 0x00)
 		addPage (cl, cl->CUR_DPAGE, pType);
 	/* reset the header of the data page container */
-	*(unsigned long int*)cl->CUR_DPAGE = 0L;
+	write_le32(cl->CUR_DPAGE, 0);
 	return NO_ERROR;
 }
 
@@ -394,13 +431,13 @@ unsigned short int	BF_OPEN (CLIENT_STRUCT *cl, char *fName)
 		/* read the shadow page to validate both pairs and retrieve the number of records */
 		if ((fread (&lcFCR_shadow, sizeof(FCR), 1, cl->fHandle)) != 1) return freeClient (cl, IO_ERROR);
 		if (lcFCR.FCRUsageCount > lcFCR_shadow.FCRUsageCount)
-			cl->numRecs = byte_swap (*((unsigned long*)&lcFCR.numRecs));
+			cl->numRecs = read_word_swapped_u32(lcFCR.numRecs);
 		else
-			cl->numRecs = byte_swap (*((unsigned long*)&lcFCR_shadow.numRecs));
-	}else{ /* less then 6x format */ 
+			cl->numRecs = read_word_swapped_u32(lcFCR_shadow.numRecs);
+	}else{ /* less then 6x format */
 		cl->fPageSize	= lcFCR.PageSize;
 		cl->VFragParam	= VFRAG_CUT_V5;
-		cl->numRecs		= byte_swap (*((unsigned long*)&lcFCR.numRecs));
+		cl->numRecs		= read_word_swapped_u32(lcFCR.numRecs);
 	}
 
 	if (cl->fVersion >= BTRIEVE_FILE_V6 && cl->fVersion < BTRIEVE_FILE_V7){
@@ -409,7 +446,7 @@ unsigned short int	BF_OPEN (CLIENT_STRUCT *cl, char *fName)
 
 	/* allocate memory to hold the current data page */
 	if ((cl->CUR_DPAGE = (char*) malloc (cl->fPageSize)) == NULL) return IO_ERROR;
-	else *(long*)cl->CUR_DPAGE = 0L;
+	else write_le32(cl->CUR_DPAGE, 0);
 
 	/* get the max number of pages */
 	fseek (cl->fHandle, 0, SEEK_END);
@@ -423,7 +460,7 @@ unsigned short int	BF_OPEN (CLIENT_STRUCT *cl, char *fName)
 	/* if var-rec's, allocate memory to hold the current var-data page */
 	if (cl->VarRecsAllowed){
 		if ((cl->CUR_VPAGE = (char*) malloc (cl->fPageSize)) == NULL) return IO_ERROR;
-		else *(long*)cl->CUR_VPAGE = 0L;
+		else write_le32(cl->CUR_VPAGE, 0);
 	}
 
 	return NO_ERROR;
@@ -462,9 +499,12 @@ static long int lp_pp(CLIENT_STRUCT *cl, long int lp )
 
 		ret += (long)(( lp << 2 ) + 4L );	   // position in PAT
 		fseek( cl->fHandle, ret, 0 );
-		fread( &lp, 4, 1, cl->fHandle );       // read it into LP
+		{
+			unsigned char rawLp[4] = {0, 0, 0, 0};
+			fread( rawLp, 4, 1, cl->fHandle );       // read it into LP
 
-		lp = byte_swap( lp );                  // and un-word-swap it
+			lp = byte_swap( read_le32(rawLp) );      // and un-word-swap it
+		}
 		lp &= 0xFFFFFFL;
 	}
 
@@ -499,8 +539,8 @@ unsigned short int getNextDataPage (CLIENT_STRUCT *cl)
 
 		if ((retval = readPageFromFile (cl, cl->CUR_DPAGE, pOff)) != NO_ERROR) return retval;
 
-		if (cl->fVersion == BTRIEVE_FILE_V6 && *(unsigned short*)(cl->CUR_DPAGE+2) != cPId -1){
-			*(unsigned long*)cl->CUR_DPAGE = 0L;
+		if (cl->fVersion == BTRIEVE_FILE_V6 && read_le16(cl->CUR_DPAGE+2) != cPId -1){
+			write_le32(cl->CUR_DPAGE, 0);
 			continue;
 		}
 
@@ -534,7 +574,7 @@ unsigned short int	getVariableData	(CLIENT_STRUCT *cl, char *dataBuffer, unsigne
 {
 	unsigned short int	numFrag		= 0;
 	unsigned short int	retval		= 0;
-	unsigned long int	VPageId		= 0;
+	uint32_t			VPageId		= 0;
 	unsigned short int	FragId		= 0;
 	unsigned short int	FragOff		= 0;
 	unsigned long int	pCnt		= 0L;
@@ -547,15 +587,11 @@ unsigned short int	getVariableData	(CLIENT_STRUCT *cl, char *dataBuffer, unsigne
 		memcpy (dataBuffer, curRecAdr + cl->recHeaderSize, (cl->FixRecLen > *dbLen) ? *dbLen : cl->FixRecLen);
 
 	if (cl->fVersion >= BTRIEVE_FILE_V8){
-		VPageId = *(short*)(curRecAdr + cl->FixRecLen + cl->recHeaderSize);
-		numFrag	= *(short*)(curRecAdr + cl->FixRecLen + 10);
+		VPageId = read_le16(curRecAdr + cl->FixRecLen + cl->recHeaderSize);
+		numFrag	= read_le16(curRecAdr + cl->FixRecLen + 10);
 	}else{
-		((unsigned char*)&VPageId)[0] = * (curRecAdr + cl->recHeaderSize + curLen);
-		((unsigned char*)&VPageId)[1] = 0x00;
-		((unsigned char*)&VPageId)[2] = *(curRecAdr + cl->recHeaderSize + curLen + 1);
-		((unsigned char*)&VPageId)[3] = *(curRecAdr + cl->recHeaderSize + curLen + 2);
-		((unsigned char*)&numFrag)[0] = *(curRecAdr + cl->recHeaderSize + curLen + 3);
-		if (VPageId != PAGE_KICK_OFF) VPageId = byte_swap (VPageId);
+		VPageId = read_vrec_page_id_v5(curRecAdr + cl->recHeaderSize + curLen);
+		numFrag	= (unsigned char)*(curRecAdr + cl->recHeaderSize + curLen + 3);
 	}
 	while (VPageId != PAGE_KICK_OFF && FragId != MAX_SHORT_INT_VAL){
 			
@@ -590,16 +626,11 @@ unsigned short int	getVariableData	(CLIENT_STRUCT *cl, char *dataBuffer, unsigne
 			if (addLen > cl->fPageSize * 2 || addLen == 0) break;
 
 			if (cl->fVersion >= BTRIEVE_FILE_V8){
-				VPageId = *(short*)(&((char*)cl->CUR_VPAGE)[ FragOff]);
-				numFrag	= *(short*)(&((char*)cl->CUR_VPAGE)[ FragOff +4]);
+				VPageId = read_le16(&((char*)cl->CUR_VPAGE)[ FragOff]);
+				numFrag	= read_le16(&((char*)cl->CUR_VPAGE)[ FragOff +4]);
 			}else{
-				((unsigned char*)&VPageId)[0] = * (cl->CUR_VPAGE + FragOff);
-				((unsigned char*)&VPageId)[1] = 0x00;
-				((unsigned char*)&VPageId)[2] = *(cl->CUR_VPAGE + FragOff + 1);
-				((unsigned char*)&VPageId)[3] = *(cl->CUR_VPAGE + FragOff + 2);
-				((unsigned char*)&numFrag)[0] = *(cl->CUR_VPAGE + FragOff + 3);
-
-				if (VPageId != PAGE_KICK_OFF) VPageId = byte_swap (VPageId);
+				VPageId = read_vrec_page_id_v5(cl->CUR_VPAGE + FragOff);
+				numFrag	= (unsigned char)*(cl->CUR_VPAGE + FragOff + 3);
 
 				if (cl->fVersion < BTRIEVE_FILE_V6){
 					if (((short*)cl->CUR_VPAGE)[ FragId] & 0x8000){
@@ -675,13 +706,13 @@ unsigned short int	BF_GET_REC (CLIENT_STRUCT *cl, char *dataBuffer, unsigned lon
 
 	if (cl->numRecs == 0L) return END_OF_FILE;
 	while ((retval = getNextRecord (cl)) == NO_ERROR){
-		if (cl->fVersion >= BTRIEVE_FILE_V6 && *(unsigned short*)(cl->curRecAdr) != 0x0000){
+		if (cl->fVersion >= BTRIEVE_FILE_V6 && read_le16(cl->curRecAdr) != 0x0000){
 			break;
 		}else if (cl->fVersion < BTRIEVE_FILE_V6){
 			unsigned long int	i		= 0;
 			char				isEmpty	= true;
 
-			if (cl->fVersion == BTRIEVE_FILE_V3 && *(unsigned short int*)cl->curRecAdr == 0x0000) continue;
+			if (cl->fVersion == BTRIEVE_FILE_V3 && read_le16(cl->curRecAdr) == 0x0000) continue;
 
 			for (i = ((cl->fVersion >= BTRIEVE_FILE_V4)? RECORD_HEADER_SIZE_V4 : RECORD_HEADER_SIZE_V3) ; 
 					i < cl->IFixedRecLen ; i++){ 

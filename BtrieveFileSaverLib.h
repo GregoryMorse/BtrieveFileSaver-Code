@@ -32,6 +32,7 @@
 #endif 
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #pragma pack(push)
@@ -62,11 +63,11 @@
 /* project defines */
 #define MAX_SINGLE_INT_VAL					0xFF		// single byte int max value
 #define MAX_SHORT_INT_VAL					0xFFFF		// 2 byte int max value
-#define	MAX_LONG_INT_VAL					0xFFFFFFFF	// 4 byte int max value
+#define	MAX_LONG_INT_VAL					UINT32_C(0xFFFFFFFF)	// 4 byte int max value
 
-#define PAGE_KICK_OFF						0xFFFF00FF	// define to overcome the page id at three byte page header
+#define PAGE_KICK_OFF						UINT32_C(0xFFFF00FF)	// define to overcome the page id at three byte page header
 
-#define	FCR_IDENT							0x00004346	// byte swaped 'FC'
+#define	FCR_IDENT							UINT32_C(0x00004346)	// byte swaped 'FC'
 
 
 /* File type/feature flags */
@@ -125,8 +126,8 @@
 
 
 /* macro definition */
-#define ReverseLongInt(x)     ((x) << 16 | (x) >> 16)
-#define VRPage(x)	(long) (((long) (x).hi << 16) | ((x).mid << 8) | (x).lo)
+#define ReverseLongInt(x)     (((uint32_t)(x) << 16) | ((uint32_t)(x) >> 16))
+#define VRPage(x)	(uint32_t) (((uint32_t) (x).hi << 16) | ((uint32_t)(x).mid << 8) | (x).lo)
 
 /* struct defines */
 typedef struct
@@ -138,13 +139,13 @@ typedef struct
 }VRECPTR;
 
 typedef struct{
-	unsigned long int		pId;			/* page id, note that it is 16Bit */
+	uint32_t				pId;			/* page id, note that it is 16Bit */
 	unsigned long int		offset;			/* physical position within the file */
 	unsigned short int		indexA;			/* sort order based on pID */
 }PAGE_LINK;
 
 typedef struct{
-	unsigned long int			PageId;
+	uint32_t					PageId;
 	unsigned short int			FCRUsageCount;
 	short int					Version;
 	short int					PageSize;
