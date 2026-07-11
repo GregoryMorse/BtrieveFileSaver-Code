@@ -729,7 +729,10 @@ unsigned short int	BF_GET_REC (CLIENT_STRUCT *cl, char *dataBuffer, unsigned lon
 
 	if (retval != NO_ERROR) return retval;
 
-	cl->curRecordId ++;
+	if (cl->curRecordId == MAX_LONG_INT_VAL)
+		cl->curRecordId = 0;
+	else
+		cl->curRecordId ++;
 
 	if (cl->VarRecsAllowed){
 		retval = getVariableData (cl, dataBuffer, dbLen, cl->curRecAdr);
