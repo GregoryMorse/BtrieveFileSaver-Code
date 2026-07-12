@@ -179,7 +179,6 @@ typedef struct{
 	unsigned short int		IFixedRecLen;			/* internal phys rec len */
 	char					recHeaderSize;			/* header size of each rec */
 	unsigned long int		curDPageID;				/* Id of the currently in use data page */
-	unsigned long int	nextDataPageIndex;		/* next entry in the validated DATArr page table */
 	char					*curRecAdr;				/* currently used record adrress*/
 	unsigned long int		curRecOff;				/* Offset of the current record within the data page */
 	/*
