@@ -526,37 +526,20 @@ static long int lp_pp(CLIENT_STRUCT *cl, long int lp )
 */
 unsigned short int getNextDataPage (CLIENT_STRUCT *cl)
 { 
-	unsigned short int	retval		= NO_ERROR;
-	unsigned long int pOff;
-	unsigned long int cPId = cl->curDPageID;
+	while (cl->nextDataPageIndex < cl->numDATPages){
+		PAGE_LINK *page = &cl->DATArr[cl->nextDataPageIndex++];
 
-	memset (cl->CUR_DPAGE, 0x00, cl->fPageSize);
-
-	while ((getPageType (cl, cl->CUR_DPAGE)) != DAT_PAGE_ID /*&& cPId < cl->fNumPages-2*/){
-		pOff = lp_pp (cl, cPId++);
-	
-		if (pOff > (cl->fNumPages * cl->fPageSize)) continue;
-
-		if ((retval = readPageFromFile (cl, cl->CUR_DPAGE, pOff)) != NO_ERROR) return retval;
-
-		if (cl->fVersion == BTRIEVE_FILE_V6 && read_le16(cl->CUR_DPAGE+2) != cPId -1){
-			write_le32(cl->CUR_DPAGE, 0);
+		memset (cl->CUR_DPAGE, 0x00, cl->fPageSize);
+		if (readPageFromFile (cl, cl->CUR_DPAGE, page->offset) != NO_ERROR)
+			return IO_ERROR;
+		if (getPageType (cl, cl->CUR_DPAGE) != DAT_PAGE_ID)
 			continue;
-		}
 
-		if (cl->fVersion == BTRIEVE_FILE_V3){
-			unsigned long usage = 0L;
-			((unsigned char*)&usage)[2] = cl->CUR_DPAGE[4];
-			((unsigned char*)&usage)[1] = cl->CUR_DPAGE[6];
-			((unsigned char*)&usage)[0] = cl->CUR_DPAGE[7];
-			if (usage == 0){
-				memset (cl->CUR_DPAGE, 0x00 , 10);
-				continue;
-			}
-		}
+		cl->curDPageID = page->pId;
+		return NO_ERROR;
 	}
-	cl->curDPageID = cPId;
-	return NO_ERROR;
+
+	return END_OF_FILE;
 }
 
 /*
