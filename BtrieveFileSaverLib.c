@@ -68,6 +68,12 @@ ________________________________________________________________________________
 
 #include "BtrieveFileSaverLib.h"
 
+#if defined(_MSC_VER) && _MSC_VER >= 1950
+#define BTRIEVE_VS2026_NOINLINE __declspec(noinline)
+#else
+#define BTRIEVE_VS2026_NOINLINE
+#endif
+
 /*
 *
 *	Function freeClient
@@ -154,26 +160,19 @@ static uint32_t read_vrec_page_id_v5(const char *data)
 *	this way.
 *
 */
-char	getPageType (CLIENT_STRUCT *cl, char *tmpPage)
+BTRIEVE_VS2026_NOINLINE char	getPageType (CLIENT_STRUCT *cl, char *tmpPage)
 {
-	switch (cl->fVersion){
-		case BTRIEVE_FILE_V3:
-		case BTRIEVE_FILE_V4:
-		case BTRIEVE_FILE_V5:{
-			if (read_le16(tmpPage + 4) & 0x8000) return DAT_PAGE_ID;
-		}break;
-		case BTRIEVE_FILE_V6:
-		case BTRIEVE_FILE_V61:
-		case BTRIEVE_FILE_V7:{
-			return tmpPage[1];
-		}break;
-		case BTRIEVE_FILE_V8:
-		case BTRIEVE_FILE_V9:
-//		case BTRIEVE_FILE_V95:
-			{
-			return tmpPage[4];
-		}break;
-	}
+	const uint16_t majorVersion = (uint16_t)cl->fVersion >> 8;
+
+	if (majorVersion >= 3 && majorVersion <= 5)
+		return (read_le16(tmpPage + 4) & 0x8000) ? DAT_PAGE_ID : 0x00;
+
+	if (majorVersion == 6 || majorVersion == 7)
+		return tmpPage[1];
+
+	if (majorVersion == 8 || majorVersion == 9)
+		return tmpPage[4];
+
 	return 0x00;	
 }
 
@@ -631,7 +630,7 @@ unsigned short int	getVariableData	(CLIENT_STRUCT *cl, char *dataBuffer, unsigne
 
 			/* get to the end of the fragment */
 			for(fEId = 1; read_le16(cl->CUR_VPAGE + ((FragId - fEId) * sizeof(uint16_t))) == UINT16_MAX; fEId++);
-				
+
 			/* calculate the length of the fragment */
 			addLen = (read_le16(cl->CUR_VPAGE + ((FragId - fEId) * sizeof(uint16_t))) & 0x7FFF) - FragOff - cl->VFragParam;
 				
