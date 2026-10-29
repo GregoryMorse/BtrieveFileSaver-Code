@@ -83,11 +83,46 @@ static int page_range_valid(const CLIENT_STRUCT *cl, size_t offset, size_t lengt
     return offset <= cl->fPageSize && length <= (size_t)cl->fPageSize - offset;
 }
 
-/* Returns 1 for a new link, 0 for a cycle, and -1 on allocation failure. */
-static int remember_fragment(uint64_t **table, size_t *capacity, size_t *count, uint64_t link)
+static int processing_allowed(CLIENT_STRUCT *cl, uint64_t units)
+{
+    if (cl->processingAborted) return 0;
+    if (cl->progress != NULL && !cl->progress(cl->progressContext, units)) {
+        cl->processingAborted = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static unsigned short read_input(CLIENT_STRUCT *cl, void *output, uint64_t offset, size_t length)
+{
+    if (!file_range_valid(cl, offset, length)) return IO_ERROR;
+    if (!processing_allowed(cl, length)) return PROCESSING_LIMIT;
+    if (cl->memoryData != NULL) {
+        memcpy(output, cl->memoryData + (size_t)offset, length);
+    } else if (cl->fHandle == NULL || fseek(cl->fHandle, (long)offset, SEEK_SET) != 0
+               || fread(output, length, 1, cl->fHandle) != 1) {
+        return IO_ERROR;
+    }
+    cl->inputPosition = offset + length;
+    return NO_ERROR;
+}
+
+static uint64_t fragment_hash(uint64_t value)
+{
+    /* Mix page and fragment bits before masking a power-of-two table. */
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+
+/* Returns 1 for a new link, 0 for a cycle, -1 for allocation failure, -2 for cancellation. */
+static int remember_fragment(CLIENT_STRUCT *cl, uint64_t **table, size_t *capacity, size_t *count, uint64_t link)
 {
     size_t index, oldIndex;
     uint64_t *grown;
+    if (!processing_allowed(cl, 1)) return -2;
     link += 1; /* Zero is the empty-entry marker. */
     if (*capacity == 0 || (*count + 1) * 2 >= *capacity) {
         const size_t nextCapacity = *capacity == 0 ? 32 : *capacity * 2;
@@ -95,17 +130,22 @@ static int remember_fragment(uint64_t **table, size_t *capacity, size_t *count, 
         grown = (uint64_t*)calloc(nextCapacity, sizeof(uint64_t));
         if (grown == NULL) return -1;
         for (oldIndex = 0; oldIndex < *capacity; ++oldIndex) {
+            if (!processing_allowed(cl, 1)) { free(grown); return -2; }
             if ((*table)[oldIndex] == 0) continue;
-            index = (size_t)((*table)[oldIndex] * UINT64_C(11400714819323198485)) & (nextCapacity - 1);
-            while (grown[index] != 0) index = (index + 1) & (nextCapacity - 1);
+            index = (size_t)fragment_hash((*table)[oldIndex]) & (nextCapacity - 1);
+            while (grown[index] != 0) {
+                if (!processing_allowed(cl, 1)) { free(grown); return -2; }
+                index = (index + 1) & (nextCapacity - 1);
+            }
             grown[index] = (*table)[oldIndex];
         }
         free(*table);
         *table = grown;
         *capacity = nextCapacity;
     }
-    index = (size_t)(link * UINT64_C(11400714819323198485)) & (*capacity - 1);
+    index = (size_t)fragment_hash(link) & (*capacity - 1);
     while ((*table)[index] != 0) {
+        if (!processing_allowed(cl, 1)) return -2;
         if ((*table)[index] == link) return 0;
         index = (index + 1) & (*capacity - 1);
     }
@@ -257,11 +297,8 @@ char	getPageType (CLIENT_STRUCT *cl, char *tmpPage)
 */
 unsigned short int readPageFromFile(CLIENT_STRUCT *cl, void *page, unsigned long offset)
 {
-    if (cl == NULL || page == NULL || cl->fHandle == NULL || cl->fPageSize < BFS_PAGE_QUANTUM
-        || !file_range_valid(cl, offset, cl->fPageSize)) return IO_ERROR;
-    if (fseek(cl->fHandle, (long)offset, SEEK_SET) != 0
-        || fread(page, cl->fPageSize, 1, cl->fHandle) != 1) return IO_ERROR;
-    return NO_ERROR;
+    if (cl == NULL || page == NULL || cl->fPageSize < BFS_PAGE_QUANTUM) return IO_ERROR;
+    return read_input(cl, page, offset, cl->fPageSize);
 }
 
 /*
@@ -281,13 +318,13 @@ unsigned long int addPage(CLIENT_STRUCT *cl, char *page, char type)
     unsigned long *count, *capacity, next;
     PAGE_LINK *grown;
     PAGE_LINK entry;
-    long position;
+    uint64_t position;
     if (type == DAT_PAGE_ID) {
         array = &cl->DATArr; count = &cl->numDATPages; capacity = &cl->datCapacity;
     } else if (type == VAT_PAGE_ID) {
         array = &cl->VATArr; count = &cl->numVATPages; capacity = &cl->vatCapacity;
     } else return NO_ERROR;
-    position = ftell(cl->fHandle);
+    position = cl->inputPosition;
     if (position < cl->fPageSize) return IO_ERROR;
     entry.offset = (unsigned long)position - cl->fPageSize;
     if (cl->fVersion >= BTRIEVE_FILE_V8) {
@@ -362,7 +399,8 @@ unsigned short int readAllPagesFromFile(CLIENT_STRUCT *cl)
         if (cl->fVersion >= BTRIEVE_FILE_V6 && cl->fVersion < BTRIEVE_FILE_V7
             && logicalPage >= 2 + 30 * (cl->numPointerPerPat + 2)) offset += 4096;
         if (!file_range_valid(cl, offset, cl->fPageSize)) break;
-        if (readPageFromFile(cl, cl->CUR_DPAGE, (unsigned long)offset) != NO_ERROR) return IO_ERROR;
+        status = readPageFromFile(cl, cl->CUR_DPAGE, (unsigned long)offset);
+        if (status != NO_ERROR) return (unsigned short)status;
         type = getPageType(cl, cl->CUR_DPAGE);
         status = addPage(cl, cl->CUR_DPAGE, type);
         if (status != NO_ERROR) return (unsigned short)status;
@@ -388,6 +426,7 @@ void sortPages(CLIENT_STRUCT *cl, char type)
     if (type == DAT_PAGE_ID) { array = cl->DATArr; count = &cl->numDATPages; }
     else if (type == VAT_PAGE_ID) { array = cl->VATArr; count = &cl->numVATPages; }
     else return;
+    if (!processing_allowed(cl, (uint64_t)*count * 32)) return;
     if (*count > 1) qsort(array, *count, sizeof(PAGE_LINK), compare_page_links);
     for (readIndex = 0; readIndex < *count; ++readIndex) {
         if (written == 0 || array[readIndex].pId != array[written - 1].pId)
@@ -407,20 +446,30 @@ void sortPages(CLIENT_STRUCT *cl, char type)
 *	cl pointer. This is similar to Btrieve where the position block is a concurrency storage. 
 *
 */
-unsigned short int BF_OPEN(CLIENT_STRUCT *cl, char *fileName)
+static void initialize_client(CLIENT_STRUCT *cl, const BF_READ_OPTIONS *options)
 {
-    FCR header, shadow;
-    unsigned int pageSize, dataHeader, requiredRecord;
-    unsigned short status;
-    long size;
-    if (cl == NULL) return CLIENT_CONNECTION_ERROR;
     memset(cl, 0, sizeof(*cl));
     cl->curRecordId = MAX_LONG_INT_VAL;
     cl->curRecOff = MAX_LONG_INT_VAL;
     cl->curDPageID = 1;
-    cl->fHandle = fileName == NULL ? NULL : fopen(fileName, "rb");
-    if (cl->fHandle == NULL) return IO_ERROR;
-    if (fread(&header, sizeof(header), 1, cl->fHandle) != 1) return freeClient(cl, IO_ERROR);
+    cl->maximumFileBytes = options != NULL && options->maximum_file_bytes != 0
+        ? options->maximum_file_bytes : UINT64_MAX;
+    if (options != NULL) {
+        cl->progress = options->progress;
+        cl->progressContext = options->context;
+    }
+}
+
+static unsigned short open_input(CLIENT_STRUCT *cl)
+{
+    FCR header, shadow;
+    unsigned int pageSize, dataHeader, requiredRecord;
+    unsigned short status;
+    if (cl->fileSize > cl->maximumFileBytes) return freeClient(cl, PROCESSING_LIMIT);
+    /* PAGE_LINK offsets and the file API use long; reject unaddressable input before scanning. */
+    if (cl->fileSize > (uint64_t)LONG_MAX) return freeClient(cl, IO_ERROR);
+    status = read_input(cl, &header, 0, sizeof(header));
+    if (status != NO_ERROR) return freeClient(cl, status);
     if (header.PageId == 0) {
         cl->fVersion = (short)abs(header.Version);
         cl->recHeaderSize = 0;
@@ -450,15 +499,12 @@ unsigned short int BF_OPEN(CLIENT_STRUCT *cl, char *fileName)
     if (cl->VarRecsAllowed) requiredRecord += cl->fVersion >= BTRIEVE_FILE_V8 ? 12 : 4;
     if (cl->FixRecLen == 0 || cl->IFixedRecLen < requiredRecord
         || cl->IFixedRecLen > pageSize - dataHeader) return freeClient(cl, IO_ERROR);
-    if (fseek(cl->fHandle, 0, SEEK_END) != 0 || (size = ftell(cl->fHandle)) < 0)
-        return freeClient(cl, IO_ERROR);
-    cl->fileSize = (uint64_t)size;
-    if (cl->fileSize < pageSize || cl->fileSize % pageSize != 0) return freeClient(cl, IO_ERROR);
+    if (cl->fileSize < pageSize || cl->fileSize % pageSize != 0
+        || cl->fileSize / pageSize > ULONG_MAX) return freeClient(cl, IO_ERROR);
     cl->fNumPages = (unsigned long)(cl->fileSize / pageSize);
     if (cl->fVersion > BTRIEVE_FILE_V5) {
-        if (!file_range_valid(cl, pageSize, sizeof(shadow))
-            || fseek(cl->fHandle, pageSize, SEEK_SET) != 0
-            || fread(&shadow, sizeof(shadow), 1, cl->fHandle) != 1) return freeClient(cl, IO_ERROR);
+        status = read_input(cl, &shadow, pageSize, sizeof(shadow));
+        if (status != NO_ERROR) return freeClient(cl, status);
         cl->numRecs = read_word_swapped_u32(
             header.FCRUsageCount > shadow.FCRUsageCount ? header.numRecs : shadow.numRecs);
     } else cl->numRecs = read_word_swapped_u32(header.numRecs);
@@ -470,11 +516,41 @@ unsigned short int BF_OPEN(CLIENT_STRUCT *cl, char *fileName)
     if (status != NO_ERROR) return freeClient(cl, status);
     sortPages(cl, DAT_PAGE_ID);
     sortPages(cl, VAT_PAGE_ID);
+    if (cl->processingAborted) return freeClient(cl, PROCESSING_LIMIT);
     if (cl->VarRecsAllowed) {
         cl->CUR_VPAGE = (char*)calloc(pageSize, 1);
         if (cl->CUR_VPAGE == NULL) return freeClient(cl, MEM_ERROR);
     }
     return NO_ERROR;
+}
+
+unsigned short BF_OPEN_WITH_OPTIONS(CLIENT_STRUCT *cl, const char *fileName, const BF_READ_OPTIONS *options)
+{
+    long size;
+    if (cl == NULL) return CLIENT_CONNECTION_ERROR;
+    initialize_client(cl, options);
+    cl->fHandle = fileName == NULL ? NULL : fopen(fileName, "rb");
+    if (cl->fHandle == NULL) return IO_ERROR;
+    if (fseek(cl->fHandle, 0, SEEK_END) != 0 || (size = ftell(cl->fHandle)) < 0)
+        return freeClient(cl, IO_ERROR);
+    cl->fileSize = (uint64_t)size;
+    return open_input(cl);
+}
+
+unsigned short BF_OPEN_MEMORY(CLIENT_STRUCT *cl, const void *bytes, uint64_t length, const BF_READ_OPTIONS *options)
+{
+    if (cl == NULL) return CLIENT_CONNECTION_ERROR;
+    initialize_client(cl, options);
+    if (bytes == NULL || length > (uint64_t)SIZE_MAX) return IO_ERROR;
+    /* The caller retains ownership and keeps the input alive until BF_CLOSE. */
+    cl->memoryData = (const unsigned char*)bytes;
+    cl->fileSize = length;
+    return open_input(cl);
+}
+
+unsigned short BF_OPEN(CLIENT_STRUCT *cl, char *fileName)
+{
+    return BF_OPEN_WITH_OPTIONS(cl, fileName, NULL);
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *\
@@ -494,6 +570,7 @@ static long int lp_pp(CLIENT_STRUCT *cl, long int logicalPage)
         pagesPerPat = (cl->fPageSize >> 2) - 2;
         pat = 2;
         while ((unsigned long)logicalPage > pagesPerPat) {
+            if (!processing_allowed(cl, 1)) return -1;
             logicalPage -= pagesPerPat;
             pat += cl->fPageSize >> 2;
             if (pat >= cl->fNumPages) return -1;
@@ -501,13 +578,12 @@ static long int lp_pp(CLIENT_STRUCT *cl, long int logicalPage)
         first = pat * cl->fPageSize;
         second = first + cl->fPageSize;
         if (!file_range_valid(cl, first + 4, 2) || !file_range_valid(cl, second + 4, 2)) return -1;
-        if (fseek(cl->fHandle, (long)(first + 4), SEEK_SET) != 0 || fread(raw, 2, 1, cl->fHandle) != 1) return -1;
+        if (read_input(cl, raw, first + 4, 2) != NO_ERROR) return -1;
         firstUsage = read_le16(raw);
-        if (fseek(cl->fHandle, (long)(second + 4), SEEK_SET) != 0 || fread(raw, 2, 1, cl->fHandle) != 1) return -1;
+        if (read_input(cl, raw, second + 4, 2) != NO_ERROR) return -1;
         secondUsage = read_le16(raw);
         offset = (firstUsage > secondUsage ? first : second) + ((uint64_t)logicalPage << 2) + 4;
-        if (!file_range_valid(cl, offset, 4) || fseek(cl->fHandle, (long)offset, SEEK_SET) != 0
-            || fread(raw, 4, 1, cl->fHandle) != 1) return -1;
+        if (read_input(cl, raw, offset, 4) != NO_ERROR) return -1;
         logicalPage = byte_swap(read_le32(raw)) & 0xFFFFFFL;
         if (logicalPage == 0xFFFFFFL) return -1;
     }
@@ -538,7 +614,9 @@ unsigned short int getNextDataPage (CLIENT_STRUCT *cl)
 		if (cPId >= cl->fNumPages)
 			return END_OF_FILE;
 
+		if (!processing_allowed(cl, 1)) return PROCESSING_LIMIT;
 		pOff = lp_pp (cl, cPId++);
+        if (cl->processingAborted) return PROCESSING_LIMIT;
 		fileSize = (uint64_t)cl->fNumPages * cl->fPageSize;
 		if (pOff < 0 || (uint64_t)pOff >= fileSize)
 			continue;
@@ -597,20 +675,24 @@ unsigned short int getVariableData(CLIENT_STRUCT *cl, char *buffer, unsigned lon
         pageId = read_vrec_page_id_v5(cl->CUR_DPAGE + pointerOffset);
         fragmentNumber = (unsigned char)cl->CUR_DPAGE[pointerOffset + 3];
     }
-    while (pageId != PAGE_KICK_OFF && fragmentNumber != MAX_SHORT_INT_VAL) {
+    /* A zero page/fragment pair denotes an absent variable portion, never the FCR. */
+    while (!(pageId == 0 && fragmentNumber == 0)
+        && pageId != PAGE_KICK_OFF && fragmentNumber != MAX_SHORT_INT_VAL) {
         long pageOffset = -1;
         unsigned long index;
         size_t tableIndex, endIndex, fragmentOffset, endOffset, dataOffset, added;
         unsigned short tableEntry;
-        int remembered = remember_fragment(&visited, &visitedCapacity, &visitedCount,
+        int remembered = remember_fragment(cl, &visited, &visitedCapacity, &visitedCount,
             ((uint64_t)pageId << 16) | fragmentNumber);
-        if (remembered <= 0) { status = remembered < 0 ? MEM_ERROR : IO_ERROR; break; }
+        if (remembered <= 0) { status = remembered == -2 ? PROCESSING_LIMIT : remembered < 0 ? MEM_ERROR : IO_ERROR; break; }
         if (cl->fVersion >= BTRIEVE_FILE_V7) {
-            for (index = 0; index < cl->numVATPages; ++index)
+            for (index = 0; index < cl->numVATPages; ++index) {
+                if (!processing_allowed(cl, 1)) break;
                 if (cl->VATArr[index].pId == pageId) { pageOffset = (long)cl->VATArr[index].offset; break; }
+            }
         } else pageOffset = lp_pp(cl, pageId);
         if (pageOffset < 0 || readPageFromFile(cl, cl->CUR_VPAGE, (unsigned long)pageOffset) != NO_ERROR) {
-            status = IO_ERROR; break;
+            status = cl->processingAborted ? PROCESSING_LIMIT : IO_ERROR; break;
         }
         tableIndex = (cl->fPageSize - 1U) / sizeof(uint16_t);
         if (fragmentNumber >= tableIndex) { status = IO_ERROR; break; }
@@ -621,6 +703,7 @@ unsigned short int getVariableData(CLIENT_STRUCT *cl, char *buffer, unsigned lon
         endIndex = tableIndex;
         do {
             if (endIndex == 0) { status = IO_ERROR; break; }
+            if (!processing_allowed(cl, 1)) { status = PROCESSING_LIMIT; break; }
             --endIndex;
         } while (read_le16(cl->CUR_VPAGE + endIndex * sizeof(uint16_t)) == UINT16_MAX);
         if (status != NO_ERROR) break;
@@ -677,6 +760,7 @@ signed short int getNextRecord(CLIENT_STRUCT *cl)
     const unsigned int header = cl->fVersion >= BTRIEVE_FILE_V8 ? DAT_PAGE_HEADER_SIZE_V8 : DAT_PAGE_HEADER_SIZE_V6;
     unsigned long count, offset;
     unsigned short status;
+    if (!processing_allowed(cl, 1)) return PROCESSING_LIMIT;
     if (cl->IFixedRecLen == 0 || cl->fPageSize < header) return IO_ERROR;
     count = (cl->fPageSize - header) / cl->IFixedRecLen;
     if (cl->curRecordId != MAX_LONG_INT_VAL && cl->curRecordId >= cl->numRecs - 1) return END_OF_FILE;

@@ -35,6 +35,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+typedef int (*BF_PROGRESS_CALLBACK)(void *context, uint64_t units);
+typedef struct {
+    uint64_t maximum_file_bytes; /* Zero preserves the original unrestricted API. */
+    BF_PROGRESS_CALLBACK progress; /* Return zero to stop processing. */
+    void *context;
+} BF_READ_OPTIONS;
+
 #pragma pack(push)
 #pragma pack(1)
 
@@ -59,6 +66,7 @@
 #define END_OF_FILE						5
 #define DATA_BUFFER_TO_SHORT			6
 #define NO_BTR_FILE						7
+#define PROCESSING_LIMIT                    8
 
 /* project defines */
 #define MAX_SINGLE_INT_VAL					0xFF		// single byte int max value
@@ -167,6 +175,12 @@ typedef struct{
 
 typedef struct{
 	FILE					*fHandle;				/* handle to the physical file */
+    const unsigned char *memoryData;
+    uint64_t inputPosition;
+    uint64_t maximumFileBytes;
+    BF_PROGRESS_CALLBACK progress;
+    void *progressContext;
+    unsigned char processingAborted;
 	uint64_t fileSize;
 	unsigned long int scanPage;
 	unsigned long int datCapacity;
@@ -202,6 +216,9 @@ typedef struct{
 }CLIENT_STRUCT;
 
 /* Prototyping */
+/* Memory input is borrowed, read-only, and must remain alive until BF_CLOSE. */
+unsigned short BF_OPEN_MEMORY(CLIENT_STRUCT *cl, const void *bytes, uint64_t length, const BF_READ_OPTIONS *options);
+unsigned short BF_OPEN_WITH_OPTIONS(CLIENT_STRUCT *cl, const char *fileName, const BF_READ_OPTIONS *options);
 unsigned short int	BF_OPEN		(CLIENT_STRUCT *cl, char *fName);
 unsigned short int	BF_GET_REC	(CLIENT_STRUCT *cl, char *dataBuffer, unsigned long *dbLen);
 unsigned short int	BF_CLOSE	(CLIENT_STRUCT *cl);
