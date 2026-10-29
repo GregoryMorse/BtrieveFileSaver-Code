@@ -167,6 +167,10 @@ typedef struct{
 
 typedef struct{
 	FILE					*fHandle;				/* handle to the physical file */
+	uint64_t fileSize;
+	unsigned long int scanPage;
+	unsigned long int datCapacity;
+	unsigned long int vatCapacity;
 	short int				fVersion;				/* file version */
 	unsigned short int		fPageSize;				/* the files page size */
 	unsigned long int		fNumPages;				/* number of pages possible within the file */
