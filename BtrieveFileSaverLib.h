@@ -173,6 +173,10 @@ typedef struct{
 	unsigned short int			UserFileFlags;          /* file flags as sent by user */
 }FCR;
 
+#pragma pack(pop)
+/* Client state is RAM-only; pointers to its members require native alignment. */
+#pragma pack(push)
+#pragma pack()
 typedef struct{
 	FILE					*fHandle;				/* handle to the physical file */
     const unsigned char *memoryData;
@@ -214,6 +218,7 @@ typedef struct{
 	unsigned long int		numDATPages;	/* number of Dat pages within the file */
 	PAGE_LINK		*DATArr;		/* array holding all dat pages */
 }CLIENT_STRUCT;
+#pragma pack(pop)
 
 /* Prototyping */
 /* Memory input is borrowed, read-only, and must remain alive until BF_CLOSE. */
@@ -222,5 +227,3 @@ unsigned short BF_OPEN_WITH_OPTIONS(CLIENT_STRUCT *cl, const char *fileName, con
 unsigned short int	BF_OPEN		(CLIENT_STRUCT *cl, char *fName);
 unsigned short int	BF_GET_REC	(CLIENT_STRUCT *cl, char *dataBuffer, unsigned long *dbLen);
 unsigned short int	BF_CLOSE	(CLIENT_STRUCT *cl);
-
-#pragma pack(pop)

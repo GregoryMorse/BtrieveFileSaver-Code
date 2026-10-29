@@ -1,6 +1,7 @@
 /* Standalone regression for the file/memory reader APIs and bounded processing. */
 #include "../BtrieveFileSaverLib.h"
 #include <limits.h>
+#include <stddef.h>
 
 static void write_u16(unsigned char *bytes, size_t offset, unsigned int value)
 {
@@ -44,6 +45,12 @@ int main(int argc, char **argv)
     BF_READ_OPTIONS options = {4096, NULL, NULL};
     FILE *output;
     CHECK(argc == 2);
+    CHECK(offsetof(FCR, FixedRecordLength) == 0x16);
+    CHECK(offsetof(FCR, IFixedRecordLength) == 0x18);
+    CHECK(offsetof(FCR, VarRecsAllowed) == 0x38);
+    CHECK(offsetof(CLIENT_STRUCT, numDATPages) % sizeof(unsigned long) == 0);
+    CHECK(offsetof(CLIENT_STRUCT, datCapacity) % sizeof(unsigned long) == 0);
+    CHECK(offsetof(CLIENT_STRUCT, DATArr) % sizeof(PAGE_LINK*) == 0);
     fixture(bytes);
     memcpy(original, bytes, sizeof(bytes));
     output = fopen(argv[1], "wb");

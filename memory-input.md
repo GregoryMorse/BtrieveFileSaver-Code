@@ -11,6 +11,8 @@ The caller owns the input memory and any decrypted material. Keep it alive and u
 
 A zero page/fragment pair denotes an absent variable portion, not the FCR. Other invalid pointers, out-of-page fragments and cycles remain errors. Cycle tracking mixes all pointer bits rather than clustering fragments that share an index.
 
+The on-disk FCR remains byte-packed, while RAM-only client state explicitly uses native alignment. The regression checks the disk offsets and alignment of client members whose addresses are used by the page tracker.
+
 ## Standalone regression
 
 Compile BtrieveFileSaverLib.c and tests/memory_input_test.c together. Pass one disposable output filename to the executable. The test creates and removes that file. It checks file/memory parity, unchanged input, size limits, callback cancellation, cleanup/reuse, null variable pointers and malformed chains.
